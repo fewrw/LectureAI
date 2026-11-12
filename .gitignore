@@ -1,0 +1,30 @@
+﻿.venv/
+__pycache__/
+*.pyc
+.env
+*.log
+temp/
+cache/
+models/
+dist/
+build/
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environment
+.venv/
+venv/
+
+# IDE
+.vscode/
+
+# Logs and temporary files
+*.log
+temp/
+cache/
+
+# Build
+build/
+dist/
