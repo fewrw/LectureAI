@@ -9,6 +9,9 @@ from pathlib import Path
 
 
 class AudioManifest:
+    SCHEMA_VERSION = 1
+    SAMPLE_WIDTH = 2
+
     def __init__(self, session_dir):
         self.session_dir = Path(session_dir)
         self.manifest_path = self.session_dir / "manifest.json"
@@ -25,25 +28,31 @@ class AudioManifest:
         checkpoint_seconds,
         device_name
     ):
-        self.session_dir.mkdir(
-            parents=True,
-            exist_ok=True
-        )
+        self.session_dir.mkdir(parents=True, exist_ok=True)
 
         if self.manifest_path.exists():
             raise FileExistsError(
-                f"Журнал уже существует: {self.manifest_path}"
+                f"Манифест уже существует: {self.manifest_path}"
             )
 
+        if sample_rate <= 0:
+            raise ValueError("Частота дискретизации должна быть больше нуля.")
+
+        if channels <= 0:
+            raise ValueError("Количество каналов должно быть больше нуля.")
+
+        if checkpoint_seconds <= 0:
+            raise ValueError("Длительность сегмента должна быть больше нуля.")
+
         self.data = {
-            "schema_version": 1,
+            "schema_version": self.SCHEMA_VERSION,
             "created_at": self._now(),
             "ended_at": None,
             "status": "recording",
             "device_name": device_name,
             "sample_rate": sample_rate,
             "channels": channels,
-            "sample_width": 2,
+            "sample_width": self.SAMPLE_WIDTH,
             "checkpoint_seconds": checkpoint_seconds,
             "segments": [],
             "total_frames": 0,
@@ -54,22 +63,17 @@ class AudioManifest:
         self._save()
 
     def load_for_resume(self):
-        """
-        Загружает прерванную сессию и подготавливает её
-        к продолжению записи.
-        """
         result = self.inspect(self.session_dir)
 
         if result["status"] != "interrupted":
-            raise RuntimeError(
-                "Продолжить можно только сессию "
-                "со статусом interrupted"
+            raise ValueError(
+                "Продолжить можно только прерванную аудиосессию."
             )
 
-        if result["invalid_segments"]:
-            raise RuntimeError(
-                "В сессии есть повреждённые сегменты. "
-                "Возобновление запрещено."
+        if not result["total_frames_matches"]:
+            raise ValueError(
+                "Количество кадров в манифесте не совпадает "
+                "с фактическим количеством кадров WAV-файлов."
             )
 
         self.data = result["manifest"]
@@ -87,11 +91,8 @@ class AudioManifest:
         return self.data
 
     def next_segment_number(self):
-        """
-        Находит следующий свободный номер сегмента.
-        Учитывает даже файлы, отсутствующие в manifest.json.
-        """
         pattern = re.compile(r"segment_(\d+)\.wav$")
+
         max_number = 0
 
         for path in self.session_dir.iterdir():
@@ -101,55 +102,66 @@ class AudioManifest:
             match = pattern.fullmatch(path.name)
 
             if match:
-                max_number = max(
-                    max_number,
-                    int(match.group(1))
-                )
+                number = int(match.group(1))
+                max_number = max(max_number, number)
 
         return max_number + 1
 
     def _save(self):
         if self.data is None:
-            raise RuntimeError("Журнал не создан")
+            raise RuntimeError("Нет данных манифеста для сохранения.")
 
-        temporary_path = self.manifest_path.with_suffix(
-            ".json.tmp"
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+
+        temporary_path = self.manifest_path.with_name(
+            self.manifest_path.name + ".tmp"
         )
 
-        with open(
-            temporary_path,
-            "w",
-            encoding="utf-8"
-        ) as file:
-            json.dump(
-                self.data,
-                file,
-                ensure_ascii=False,
-                indent=4
-            )
+        try:
+            with open(
+                temporary_path,
+                "w",
+                encoding="utf-8"
+            ) as file:
+                json.dump(
+                    self.data,
+                    file,
+                    ensure_ascii=False,
+                    indent=4
+                )
 
-            file.flush()
-            os.fsync(file.fileno())
+                file.flush()
+                os.fsync(file.fileno())
 
-        os.replace(
-            temporary_path,
-            self.manifest_path
-        )
+            os.replace(temporary_path, self.manifest_path)
 
-    def add_segment(self, segment_path):
+        finally:
+            if temporary_path.exists():
+                try:
+                    temporary_path.unlink()
+                except OSError:
+                    pass
+
+    def add_segment(
+        self,
+        segment_path,
+        started_at=None,
+        ended_at=None
+    ):
+        if self.data is None:
+            raise RuntimeError("Манифест не инициализирован.")
+
         segment_path = Path(segment_path).resolve()
         session_root = self.session_dir.resolve()
 
         try:
-            relative_path = segment_path.relative_to(
-                session_root
-            )
+            relative_path = segment_path.relative_to(session_root)
         except ValueError:
             raise ValueError(
-                "Сегмент должен находиться внутри папки сессии"
+                "WAV-файл должен находиться внутри папки аудиосессии."
             )
 
-        relative_name = str(relative_path)
+        relative_name = relative_path.as_posix()
 
         existing_files = {
             segment["file"]
@@ -158,30 +170,43 @@ class AudioManifest:
 
         if relative_name in existing_files:
             raise ValueError(
-                f"Сегмент уже есть в журнале: {relative_name}"
+                f"Сегмент уже зарегистрирован: {relative_name}"
             )
 
         if not segment_path.is_file():
-            raise FileNotFoundError(segment_path)
+            raise FileNotFoundError(
+                f"Файл сегмента не найден: {segment_path}"
+            )
 
         with wave.open(str(segment_path), "rb") as audio:
             frames = audio.getnframes()
             sample_rate = audio.getframerate()
             channels = audio.getnchannels()
             sample_width = audio.getsampwidth()
+            compression = audio.getcomptype()
 
-        if sample_width != self.data["sample_width"]:
-            raise ValueError("Неожиданная разрядность аудио")
+        if compression != "NONE":
+            raise ValueError("Поддерживаются только WAV PCM без сжатия.")
+
+        if sample_width != self.SAMPLE_WIDTH:
+            raise ValueError(
+                f"Неверная глубина аудио: {sample_width} байт."
+            )
 
         if sample_rate != self.data["sample_rate"]:
-            raise ValueError("Частота аудио не совпадает")
+            raise ValueError(
+                "Частота дискретизации сегмента не совпадает с манифестом."
+            )
 
         if channels != self.data["channels"]:
             raise ValueError(
-                "Количество каналов не совпадает"
+                "Количество каналов сегмента не совпадает с манифестом."
             )
 
-        self.data["segments"].append({
+        if frames <= 0:
+            raise ValueError("Аудиосегмент пустой.")
+
+        segment_data = {
             "file": relative_name,
             "frames": frames,
             "duration_seconds": round(
@@ -189,68 +214,198 @@ class AudioManifest:
                 3
             ),
             "completed_at": self._now()
-        })
+        }
 
-        self.data["total_frames"] += frames
+        if started_at is not None:
+            segment_data["started_at"] = started_at
 
-        self._save()
+        if ended_at is not None:
+            segment_data["ended_at"] = ended_at
+
+        # Сначала сохраняем новую версию данных.
+        # Если сохранение не удалось, память остаётся без изменений.
+        updated_data = dict(self.data)
+        updated_segments = list(self.data["segments"])
+
+        updated_segments.append(segment_data)
+
+        updated_data["segments"] = updated_segments
+        updated_data["total_frames"] = (
+            self.data["total_frames"] + frames
+        )
+
+        previous_data = self.data
+        self.data = updated_data
+
+        try:
+            self._save()
+        except Exception:
+            self.data = previous_data
+            raise
 
     def finish(self, dropped_chunks=0):
         if self.data is None:
-            raise RuntimeError("Журнал не загружен")
+            raise RuntimeError("Манифест не инициализирован.")
 
-        self.data["status"] = "completed"
-        self.data["ended_at"] = self._now()
-        self.data["dropped_chunks"] = dropped_chunks
+        updated_data = dict(self.data)
 
-        self._save()
+        updated_data["status"] = "completed"
+        updated_data["ended_at"] = self._now()
+        updated_data["dropped_chunks"] = dropped_chunks
+
+        previous_data = self.data
+        self.data = updated_data
+
+        try:
+            self._save()
+        except Exception:
+            self.data = previous_data
+            raise
 
     @classmethod
     def inspect(cls, session_dir):
-        session_dir = Path(session_dir)
+        session_dir = Path(session_dir).resolve()
         manifest_path = session_dir / "manifest.json"
 
-        if not manifest_path.exists():
+        if not manifest_path.is_file():
             raise FileNotFoundError(
-                "Журнал аудиосессии не найден"
+                f"Манифест не найден: {manifest_path}"
             )
 
-        with open(
-            manifest_path,
-            "r",
-            encoding="utf-8"
-        ) as file:
+        with open(manifest_path, "r", encoding="utf-8") as file:
             data = json.load(file)
+
+        if not isinstance(data, dict):
+            raise ValueError("Некорректная структура манифеста.")
+
+        required_fields = {
+            "schema_version",
+            "status",
+            "sample_rate",
+            "channels",
+            "sample_width",
+            "segments",
+            "total_frames"
+        }
+
+        missing_fields = required_fields - data.keys()
+
+        if missing_fields:
+            raise ValueError(
+                f"В манифесте отсутствуют поля: {missing_fields}"
+            )
+
+        if data["schema_version"] != cls.SCHEMA_VERSION:
+            raise ValueError(
+                "Неподдерживаемая версия схемы манифеста: "
+                f"{data['schema_version']}"
+            )
+
+        if data["status"] not in {
+            "recording",
+            "interrupted",
+            "completed"
+        }:
+            raise ValueError(
+                f"Неизвестный статус сессии: {data['status']}"
+            )
+
+        if not isinstance(data["segments"], list):
+            raise ValueError("Поле segments должно быть списком.")
+
+        if data["sample_rate"] <= 0:
+            raise ValueError("Некорректная частота дискретизации.")
+
+        if data["channels"] <= 0:
+            raise ValueError("Некорректное количество каналов.")
+
+        if data["sample_width"] != cls.SAMPLE_WIDTH:
+            raise ValueError("Неподдерживаемая глубина аудио.")
 
         valid_segments = []
         invalid_segments = []
+        registered_files = set()
+        actual_total_frames = 0
 
         for segment in data["segments"]:
+            if not isinstance(segment, dict):
+                invalid_segments.append({
+                    "segment": segment,
+                    "error": "Некорректная структура записи сегмента."
+                })
+                continue
+
+            relative_name = segment.get("file")
+
+            if not isinstance(relative_name, str) or not relative_name:
+                invalid_segments.append({
+                    "segment": segment,
+                    "error": "Отсутствует имя файла."
+                })
+                continue
+
+            relative_path = Path(relative_name)
+
+            if relative_path.is_absolute() or ".." in relative_path.parts:
+                invalid_segments.append({
+                    "file": relative_name,
+                    "error": "Недопустимый путь к файлу."
+                })
+                continue
+
+            normalized_name = relative_path.as_posix()
+
+            if normalized_name in registered_files:
+                invalid_segments.append({
+                    "file": relative_name,
+                    "error": "Повторная регистрация одного файла."
+                })
+                continue
+
+            registered_files.add(normalized_name)
+
+            segment_path = (session_dir / relative_path).resolve()
+
             try:
-                relative_path = Path(segment["file"])
+                segment_path.relative_to(session_dir)
+            except ValueError:
+                invalid_segments.append({
+                    "file": relative_name,
+                    "error": "Путь выходит за пределы аудиосессии."
+                })
+                continue
 
-                if relative_path.is_absolute() or ".." in relative_path.parts:
-                    raise ValueError(
-                        "Недопустимый путь сегмента"
-                    )
+            try:
+                if not segment_path.is_file():
+                    raise FileNotFoundError("Файл не найден.")
 
-                path = session_dir / relative_path
+                with wave.open(str(segment_path), "rb") as audio:
+                    frames = audio.getnframes()
+                    sample_rate = audio.getframerate()
+                    channels = audio.getnchannels()
+                    sample_width = audio.getsampwidth()
+                    compression = audio.getcomptype()
 
-                with wave.open(str(path), "rb") as audio:
-                    valid = (
-                        audio.getnframes() == segment["frames"]
-                        and audio.getframerate()
-                        == data["sample_rate"]
-                        and audio.getnchannels()
-                        == data["channels"]
-                        and audio.getsampwidth()
-                        == data["sample_width"]
-                    )
+                if compression != "NONE":
+                    raise ValueError("WAV использует сжатие.")
 
-                if valid:
-                    valid_segments.append(segment)
-                else:
-                    invalid_segments.append(segment)
+                if frames <= 0:
+                    raise ValueError("Сегмент пустой.")
+
+                if sample_rate != data["sample_rate"]:
+                    raise ValueError("Не совпадает частота дискретизации.")
+
+                if channels != data["channels"]:
+                    raise ValueError("Не совпадает количество каналов.")
+
+                if sample_width != data["sample_width"]:
+                    raise ValueError("Не совпадает глубина аудио.")
+
+                if segment.get("frames") != frames:
+                    raise ValueError("Количество кадров не совпадает.")
+
+                valid_segments.append(segment)
+                actual_total_frames += frames
 
             except (
                 OSError,
@@ -258,13 +413,25 @@ class AudioManifest:
                 wave.Error,
                 KeyError,
                 ValueError
-            ):
-                invalid_segments.append(segment)
+            ) as error:
+                invalid_segments.append({
+                    "file": relative_name,
+                    "error": str(error)
+                })
+
+        manifest_total_frames = data["total_frames"]
+
+        total_frames_matches = (
+            actual_total_frames == manifest_total_frames
+        )
 
         return {
             "status": data["status"],
             "valid_segments": valid_segments,
             "invalid_segments": invalid_segments,
             "total_segments": len(data["segments"]),
+            "actual_total_frames": actual_total_frames,
+            "manifest_total_frames": manifest_total_frames,
+            "total_frames_matches": total_frames_matches,
             "manifest": data
         }

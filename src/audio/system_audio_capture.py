@@ -2,6 +2,7 @@
 import queue
 import threading
 import time
+import math
 from dataclasses import dataclass
 
 import pyaudiowpatch as pyaudio
@@ -11,8 +12,10 @@ import pyaudiowpatch as pyaudio
 class AudioChunk:
     data: bytes
     captured_at: float
+    monotonic_at: float
     sample_rate: int
     channels: int
+    buffer_start_offset: float | None = None
 
 
 class SystemAudioCapture:
@@ -222,11 +225,35 @@ class SystemAudioCapture:
             )
 
         if in_data:
+            captured_at = time.time()
+            monotonic_at = time.monotonic()
+
+            buffer_start_offset = None
+
+            try:
+                current_time = float(
+                    time_info["current_time"]
+                )
+
+                adc_time = float(
+                    time_info["input_buffer_adc_time"]
+                )
+
+                offset = current_time - adc_time
+
+                if math.isfinite(offset) and 0 <= offset <= 2:
+                    buffer_start_offset = offset
+
+            except (KeyError, TypeError, ValueError):
+                pass
+
             chunk = AudioChunk(
                 data=in_data,
-                captured_at=time.time(),
+                captured_at=captured_at,
+                monotonic_at=monotonic_at,
                 sample_rate=self.sample_rate,
-                channels=self.channels
+                channels=self.channels,
+                buffer_start_offset=buffer_start_offset
             )
 
             try:
