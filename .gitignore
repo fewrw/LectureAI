@@ -27,3 +27,8 @@ dist/
 
 # User data
 src/storage/subjects.json
+
+# SQLite database
+src/storage/lectures.db
+src/storage/lectures.db-wal
+src/storage/lectures.db-shm
