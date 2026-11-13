@@ -1,5 +1,6 @@
 import sqlite3
 from pathlib import Path
+from contextlib import contextmanager
 
 
 class LectureRepository:
@@ -13,10 +14,19 @@ class LectureRepository:
 
         self._initialize_database()
 
+    @contextmanager
     def _connect(self):
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
-        return connection
+
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def _initialize_database(self):
         with self._connect() as connection:
@@ -44,6 +54,18 @@ class LectureRepository:
                 CREATE INDEX IF NOT EXISTS idx_lectures_subject
                 ON lectures(subject)
             """)
+
+    def create_lecture(self, subject, title, status="draft"):
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO lectures (subject, title, status)
+                VALUES (?, ?, ?)
+                """,
+                (subject, title, status)
+            )
+
+        return cursor.lastrowid
 
     def list_lectures(self, search_text="", subject=None):
         query = """
