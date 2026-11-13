@@ -1,14 +1,4 @@
-﻿.venv/
-__pycache__/
-*.pyc
-.env
-*.log
-temp/
-cache/
-models/
-dist/
-build/
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -20,11 +10,20 @@ venv/
 # IDE
 .vscode/
 
+# Environment variables
+.env
+
 # Logs and temporary files
 *.log
 temp/
 cache/
 
+# Models
+models/
+
 # Build
 build/
 dist/
+
+# User data
+src/storage/subjects.json
