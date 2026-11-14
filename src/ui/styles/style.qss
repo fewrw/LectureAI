@@ -283,3 +283,47 @@ QStatusBar {
     color: #98A7BB;
     background: #171B22;
 }
+
+/* =========================
+   SETTINGS PAGE
+========================= */
+
+QLineEdit#settings_path {
+    background: #191E27;
+    color: #F0F3F8;
+    border: 1px solid #2A303B;
+    border-radius: 7px;
+    padding: 10px 12px;
+    font-size: 12px;
+}
+
+QLineEdit#settings_path:focus {
+    border: 1px solid #3479E8;
+}
+
+QPushButton#browse_button {
+    background: #29384D;
+    color: #B9C9E0;
+    border: 1px solid #394D68;
+    border-radius: 7px;
+    padding: 9px 18px;
+    font-size: 11px;
+}
+
+QPushButton#browse_button:hover {
+    background: #354B68;
+}
+
+QPushButton#save_settings_button {
+    background: #3479E8;
+    color: white;
+    border: none;
+    border-radius: 7px;
+    padding: 12px 18px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+QPushButton#save_settings_button:hover {
+    background: #478BFA;
+}

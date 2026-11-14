@@ -3,6 +3,7 @@ import json
 import os
 import re
 import wave
+import math
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,40 @@ class AudioManifest:
     def _now():
         return datetime.now(timezone.utc).isoformat()
 
+    @staticmethod
+    def _validate_elapsed_times(start, end):
+        if (start is None) != (end is None):
+            raise ValueError(
+                "Время начала и окончания должны "
+                "указываться одновременно"
+            )
+
+        if start is None:
+            return
+
+        values = {
+            "start_elapsed_seconds": start,
+            "end_elapsed_seconds": end,
+        }
+
+        for name, value in values.items():
+            if isinstance(value, bool) or not isinstance(
+                value, (int, float)
+            ):
+                raise ValueError(
+                    f"{name}: значение должно быть числом"
+                )
+
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(
+                    f"{name}: некорректное значение времени"
+                )
+
+        if end < start:
+            raise ValueError(
+                "Время окончания не может быть раньше времени начала"
+            )
+
     def create(
         self,
         sample_rate,
@@ -36,13 +71,19 @@ class AudioManifest:
             )
 
         if sample_rate <= 0:
-            raise ValueError("Частота дискретизации должна быть больше нуля.")
+            raise ValueError(
+                "Частота дискретизации должна быть больше нуля."
+            )
 
         if channels <= 0:
-            raise ValueError("Количество каналов должно быть больше нуля.")
+            raise ValueError(
+                "Количество каналов должно быть больше нуля."
+            )
 
         if checkpoint_seconds <= 0:
-            raise ValueError("Длительность сегмента должна быть больше нуля.")
+            raise ValueError(
+                "Длительность сегмента должна быть больше нуля."
+            )
 
         self.data = {
             "schema_version": self.SCHEMA_VERSION,
@@ -74,6 +115,12 @@ class AudioManifest:
             raise ValueError(
                 "Количество кадров в манифесте не совпадает "
                 "с фактическим количеством кадров WAV-файлов."
+            )
+
+        if result["invalid_segments"]:
+            raise ValueError(
+                "Нельзя продолжить сессию: обнаружены "
+                "некорректные аудиосегменты."
             )
 
         self.data = result["manifest"]
@@ -109,7 +156,9 @@ class AudioManifest:
 
     def _save(self):
         if self.data is None:
-            raise RuntimeError("Нет данных манифеста для сохранения.")
+            raise RuntimeError(
+                "Нет данных манифеста для сохранения."
+            )
 
         self.session_dir.mkdir(parents=True, exist_ok=True)
 
@@ -146,10 +195,19 @@ class AudioManifest:
         self,
         segment_path,
         started_at=None,
-        ended_at=None
+        ended_at=None,
+        start_elapsed_seconds=None,
+        end_elapsed_seconds=None
     ):
+        self._validate_elapsed_times(
+            start_elapsed_seconds,
+            end_elapsed_seconds
+        )
+
         if self.data is None:
-            raise RuntimeError("Манифест не инициализирован.")
+            raise RuntimeError(
+                "Манифест не инициализирован."
+            )
 
         segment_path = Path(segment_path).resolve()
         session_root = self.session_dir.resolve()
@@ -186,7 +244,9 @@ class AudioManifest:
             compression = audio.getcomptype()
 
         if compression != "NONE":
-            raise ValueError("Поддерживаются только WAV PCM без сжатия.")
+            raise ValueError(
+                "Поддерживаются только WAV PCM без сжатия."
+            )
 
         if sample_width != self.SAMPLE_WIDTH:
             raise ValueError(
@@ -195,12 +255,14 @@ class AudioManifest:
 
         if sample_rate != self.data["sample_rate"]:
             raise ValueError(
-                "Частота дискретизации сегмента не совпадает с манифестом."
+                "Частота дискретизации сегмента "
+                "не совпадает с манифестом."
             )
 
         if channels != self.data["channels"]:
             raise ValueError(
-                "Количество каналов сегмента не совпадает с манифестом."
+                "Количество каналов сегмента "
+                "не совпадает с манифестом."
             )
 
         if frames <= 0:
@@ -222,8 +284,15 @@ class AudioManifest:
         if ended_at is not None:
             segment_data["ended_at"] = ended_at
 
-        # Сначала сохраняем новую версию данных.
-        # Если сохранение не удалось, память остаётся без изменений.
+        if start_elapsed_seconds is not None:
+            segment_data["start_elapsed_seconds"] = float(
+                start_elapsed_seconds
+            )
+
+            segment_data["end_elapsed_seconds"] = float(
+                end_elapsed_seconds
+            )
+
         updated_data = dict(self.data)
         updated_segments = list(self.data["segments"])
 
@@ -245,7 +314,9 @@ class AudioManifest:
 
     def finish(self, dropped_chunks=0):
         if self.data is None:
-            raise RuntimeError("Манифест не инициализирован.")
+            raise RuntimeError(
+                "Манифест не инициализирован."
+            )
 
         updated_data = dict(self.data)
 
@@ -272,11 +343,17 @@ class AudioManifest:
                 f"Манифест не найден: {manifest_path}"
             )
 
-        with open(manifest_path, "r", encoding="utf-8") as file:
+        with open(
+            manifest_path,
+            "r",
+            encoding="utf-8"
+        ) as file:
             data = json.load(file)
 
         if not isinstance(data, dict):
-            raise ValueError("Некорректная структура манифеста.")
+            raise ValueError(
+                "Некорректная структура манифеста."
+            )
 
         required_fields = {
             "schema_version",
@@ -311,16 +388,32 @@ class AudioManifest:
             )
 
         if not isinstance(data["segments"], list):
-            raise ValueError("Поле segments должно быть списком.")
+            raise ValueError(
+                "Поле segments должно быть списком."
+            )
 
-        if data["sample_rate"] <= 0:
-            raise ValueError("Некорректная частота дискретизации.")
+        if (
+            isinstance(data["sample_rate"], bool)
+            or not isinstance(data["sample_rate"], int)
+            or data["sample_rate"] <= 0
+        ):
+            raise ValueError(
+                "Некорректная частота дискретизации."
+            )
 
-        if data["channels"] <= 0:
-            raise ValueError("Некорректное количество каналов.")
+        if (
+            isinstance(data["channels"], bool)
+            or not isinstance(data["channels"], int)
+            or data["channels"] <= 0
+        ):
+            raise ValueError(
+                "Некорректное количество каналов."
+            )
 
         if data["sample_width"] != cls.SAMPLE_WIDTH:
-            raise ValueError("Неподдерживаемая глубина аудио.")
+            raise ValueError(
+                "Неподдерживаемая глубина аудио."
+            )
 
         valid_segments = []
         invalid_segments = []
@@ -335,9 +428,36 @@ class AudioManifest:
                 })
                 continue
 
+            # Проверка временных меток
+            has_start = "start_elapsed_seconds" in segment
+            has_end = "end_elapsed_seconds" in segment
+
+            if has_start != has_end:
+                invalid_segments.append({
+                    "segment": segment,
+                    "error": "Отсутствует одна из временных меток."
+                })
+                continue
+
+            if has_start:
+                try:
+                    cls._validate_elapsed_times(
+                        segment["start_elapsed_seconds"],
+                        segment["end_elapsed_seconds"]
+                    )
+                except (ValueError, TypeError) as error:
+                    invalid_segments.append({
+                        "segment": segment,
+                        "error": str(error)
+                    })
+                    continue
+
             relative_name = segment.get("file")
 
-            if not isinstance(relative_name, str) or not relative_name:
+            if (
+                not isinstance(relative_name, str)
+                or not relative_name
+            ):
                 invalid_segments.append({
                     "segment": segment,
                     "error": "Отсутствует имя файла."
@@ -346,7 +466,10 @@ class AudioManifest:
 
             relative_path = Path(relative_name)
 
-            if relative_path.is_absolute() or ".." in relative_path.parts:
+            if (
+                relative_path.is_absolute()
+                or ".." in relative_path.parts
+            ):
                 invalid_segments.append({
                     "file": relative_name,
                     "error": "Недопустимый путь к файлу."
@@ -364,7 +487,9 @@ class AudioManifest:
 
             registered_files.add(normalized_name)
 
-            segment_path = (session_dir / relative_path).resolve()
+            segment_path = (
+                session_dir / relative_path
+            ).resolve()
 
             try:
                 segment_path.relative_to(session_dir)
@@ -377,9 +502,14 @@ class AudioManifest:
 
             try:
                 if not segment_path.is_file():
-                    raise FileNotFoundError("Файл не найден.")
+                    raise FileNotFoundError(
+                        "Файл не найден."
+                    )
 
-                with wave.open(str(segment_path), "rb") as audio:
+                with wave.open(
+                    str(segment_path),
+                    "rb"
+                ) as audio:
                     frames = audio.getnframes()
                     sample_rate = audio.getframerate()
                     channels = audio.getnchannels()
@@ -387,22 +517,34 @@ class AudioManifest:
                     compression = audio.getcomptype()
 
                 if compression != "NONE":
-                    raise ValueError("WAV использует сжатие.")
+                    raise ValueError(
+                        "WAV использует сжатие."
+                    )
 
                 if frames <= 0:
-                    raise ValueError("Сегмент пустой.")
+                    raise ValueError(
+                        "Сегмент пустой."
+                    )
 
                 if sample_rate != data["sample_rate"]:
-                    raise ValueError("Не совпадает частота дискретизации.")
+                    raise ValueError(
+                        "Не совпадает частота дискретизации."
+                    )
 
                 if channels != data["channels"]:
-                    raise ValueError("Не совпадает количество каналов.")
+                    raise ValueError(
+                        "Не совпадает количество каналов."
+                    )
 
                 if sample_width != data["sample_width"]:
-                    raise ValueError("Не совпадает глубина аудио.")
+                    raise ValueError(
+                        "Не совпадает глубина аудио."
+                    )
 
                 if segment.get("frames") != frames:
-                    raise ValueError("Количество кадров не совпадает.")
+                    raise ValueError(
+                        "Количество кадров не совпадает."
+                    )
 
                 valid_segments.append(segment)
                 actual_total_frames += frames

@@ -11,6 +11,74 @@ from audio.audio_manifest import AudioManifest
 
 class TestAudioManifest(unittest.TestCase):
 
+    def test_inspect_detects_invalid_elapsed(self):
+        path = self.create_wav()
+
+        self.manifest.add_segment(
+            path,
+            start_elapsed_seconds=1,
+            end_elapsed_seconds=2,
+        )
+
+        self.manifest.data["segments"][0][
+            "end_elapsed_seconds"
+        ] = float("inf")
+
+        self.manifest._save()
+
+        result = AudioManifest.inspect(self.session_dir)
+
+        self.assertEqual(len(result["valid_segments"]), 0)
+        self.assertEqual(len(result["invalid_segments"]), 1)
+
+    def test_inspect_accepts_legacy_segment_without_elapsed(self):
+        path = self.create_wav()
+        self.manifest.add_segment(path)
+
+        result = AudioManifest.inspect(self.session_dir)
+
+        self.assertEqual(len(result["valid_segments"]), 1)
+        self.assertEqual(len(result["invalid_segments"]), 0)
+
+    def test_add_segment_rejects_negative_elapsed(self):
+        path = self.create_wav()
+
+        with self.assertRaises(ValueError):
+            self.manifest.add_segment(
+                path,
+                start_elapsed_seconds=-1,
+                end_elapsed_seconds=1,
+            )
+
+    def test_add_segment_rejects_infinite_elapsed(self):
+        path = self.create_wav()
+
+        with self.assertRaises(ValueError):
+            self.manifest.add_segment(
+                path,
+                start_elapsed_seconds=0,
+                end_elapsed_seconds=float("inf"),
+            )
+
+    def test_add_segment_rejects_invalid_elapsed_order(self):
+        path = self.create_wav()
+
+        with self.assertRaises(ValueError):
+            self.manifest.add_segment(
+                path,
+                start_elapsed_seconds=5,
+                end_elapsed_seconds=3,
+            )
+
+    def test_add_segment_requires_both_elapsed_values(self):
+        path = self.create_wav()
+
+        with self.assertRaises(ValueError):
+            self.manifest.add_segment(
+                path,
+                start_elapsed_seconds=1,
+            )
+
     def test_resume_rejects_total_frames_mismatch(self):
         path = self.create_wav()
         self.manifest.add_segment(path)

@@ -10,8 +10,14 @@ from audio.audio_manifest import AudioManifest
 
 
 class AudioRecorder:
-    def __init__(self, checkpoint_seconds=30):
+    def __init__(
+        self,
+        checkpoint_seconds=30,
+        session_clock=None
+    ):
         self._capture = SystemAudioCapture()
+        self._clock = session_clock
+
         self._thread = None
         self._stop_event = threading.Event()
 
@@ -27,6 +33,9 @@ class AudioRecorder:
         self._segment_started_monotonic = None
         self._segment_ended_at = None
         self._segment_ended_monotonic = None
+
+        self._segment_started_elapsed = None
+        self._segment_ended_elapsed = None
 
     @property
     def is_running(self):
@@ -50,6 +59,15 @@ class AudioRecorder:
             timezone.utc
         ).isoformat()
 
+    def _elapsed_at(self, monotonic_at):
+        if self._clock is None:
+            return None
+
+        if not self._clock.is_started:
+            return None
+
+        return self._clock.elapsed(monotonic_at)
+
     def _start_writer(self):
         self._stop_event.clear()
 
@@ -64,6 +82,14 @@ class AudioRecorder:
     def start(self, output_dir, output_device_index=None):
         if self.is_running:
             raise RuntimeError("Запись уже запущена")
+
+        if (
+            self._clock is not None
+            and not self._clock.is_started
+        ):
+            raise RuntimeError(
+                "SessionClock должен быть запущен до аудиозаписи"
+            )
 
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(
@@ -106,6 +132,14 @@ class AudioRecorder:
         if self.is_running:
             raise RuntimeError("Запись уже запущена")
 
+        if (
+            self._clock is not None
+            and not self._clock.is_started
+        ):
+            raise RuntimeError(
+                "SessionClock должен быть запущен до возобновления записи"
+            )
+
         self._output_dir = Path(session_dir)
 
         self._error = None
@@ -116,10 +150,8 @@ class AudioRecorder:
             self._output_dir
         )
 
-        # Загружаем и проверяем существующую сессию.
         data = self._manifest.load_for_resume()
 
-        # Используем исходные параметры сегментации.
         self.checkpoint_seconds = data["checkpoint_seconds"]
         self.frames_written = data["total_frames"]
 
@@ -148,8 +180,6 @@ class AudioRecorder:
             try:
                 self._capture.stop()
             finally:
-                # Возвращаем сессию в состояние,
-                # в котором её можно восстановить повторно.
                 self._manifest.data["status"] = "interrupted"
                 self._manifest.data["ended_at"] = (
                     AudioManifest._now()
@@ -197,7 +227,6 @@ class AudioRecorder:
                         "Получен аудиоблок неполной длины"
                     )
 
-                # Определяем длительность аудиоблока.
                 chunk_frames = (
                     len(data) // bytes_per_frame
                 )
@@ -206,9 +235,6 @@ class AudioRecorder:
                     chunk_frames / chunk.sample_rate
                 )
 
-                # Используем временную метку PortAudio,
-                # если она доступна и прошла проверку.
-                # Иначе используем оценку по длительности блока.
                 buffer_offset = chunk.buffer_start_offset
 
                 if buffer_offset is None:
@@ -224,7 +250,6 @@ class AudioRecorder:
 
                 while offset < len(data):
 
-                    # Если сегмент ещё не открыт — создаём его.
                     if writer is None:
                         segment_number += 1
                         segment_frames = 0
@@ -249,6 +274,12 @@ class AudioRecorder:
                             + offset / bytes_per_frame / chunk.sample_rate
                         )
 
+                        self._segment_started_elapsed = (
+                            self._elapsed_at(
+                                self._segment_started_monotonic
+                            )
+                        )
+
                         writer = wave.open(
                             str(segment_path),
                             "wb"
@@ -258,7 +289,6 @@ class AudioRecorder:
                         writer.setsampwidth(2)
                         writer.setframerate(chunk.sample_rate)
 
-                    # Сколько кадров осталось до конца сегмента.
                     remaining_frames = (
                         frames_per_segment - segment_frames
                     )
@@ -267,7 +297,6 @@ class AudioRecorder:
                         remaining_frames * bytes_per_frame
                     )
 
-                    # Берём часть текущего аудиоблока.
                     part = data[
                         offset:offset + remaining_bytes
                     ]
@@ -283,7 +312,6 @@ class AudioRecorder:
 
                     offset += len(part)
 
-                    # Обновляем время окончания записанной части.
                     self._segment_ended_at = (
                         chunk_started_at
                         + offset / bytes_per_frame / chunk.sample_rate
@@ -294,10 +322,23 @@ class AudioRecorder:
                         + offset / bytes_per_frame / chunk.sample_rate
                     )
 
-                    # Сегмент достиг заданной длительности.
+                    self._segment_ended_elapsed = (
+                        self._elapsed_at(
+                            self._segment_ended_monotonic
+                        )
+                    )
+
                     if segment_frames >= frames_per_segment:
                         segment_started_at = self._segment_started_at
                         segment_ended_at = self._segment_ended_at
+
+                        segment_started_elapsed = (
+                            self._segment_started_elapsed
+                        )
+
+                        segment_ended_elapsed = (
+                            self._segment_ended_elapsed
+                        )
 
                         writer.close()
                         writer = None
@@ -309,6 +350,12 @@ class AudioRecorder:
                             ),
                             ended_at=self._to_iso(
                                 segment_ended_at
+                            ),
+                            start_elapsed_seconds=(
+                                segment_started_elapsed
+                            ),
+                            end_elapsed_seconds=(
+                                segment_ended_elapsed
                             )
                         )
 
@@ -320,14 +367,24 @@ class AudioRecorder:
                         self._segment_ended_at = None
                         self._segment_ended_monotonic = None
 
+                        self._segment_started_elapsed = None
+                        self._segment_ended_elapsed = None
+
         except Exception as error:
             self._error = error
 
         finally:
-            # Сохраняем последний неполный сегмент.
             if writer is not None:
                 segment_started_at = self._segment_started_at
                 segment_ended_at = self._segment_ended_at
+
+                segment_started_elapsed = (
+                    self._segment_started_elapsed
+                )
+
+                segment_ended_elapsed = (
+                    self._segment_ended_elapsed
+                )
 
                 writer.close()
 
@@ -340,6 +397,12 @@ class AudioRecorder:
                             ),
                             ended_at=self._to_iso(
                                 segment_ended_at
+                            ),
+                            start_elapsed_seconds=(
+                                segment_started_elapsed
+                            ),
+                            end_elapsed_seconds=(
+                                segment_ended_elapsed
                             )
                         )
 
